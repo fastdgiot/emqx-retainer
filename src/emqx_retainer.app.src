@@ -1,6 +1,6 @@
 {application, emqx_retainer,
  [{description, "EMQ X Retainer"},
-  {vsn, "git"},
+  {vsn, "4.3.2"}, % strict semver, bump manually!
   {modules, []},
   {registered, [emqx_retainer_sup]},
   {applications, [kernel,stdlib]},

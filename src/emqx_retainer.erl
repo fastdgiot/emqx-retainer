@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -37,6 +37,9 @@
 
 -export([clean/1]).
 
+%% for emqx_pool task func
+-export([dispatch/2]).
+
 %% gen_server callbacks
 -export([ init/1
         , handle_call/3
@@ -53,8 +56,9 @@
 %%--------------------------------------------------------------------
 
 load(Env) ->
-    emqx:hook('session.subscribed', fun ?MODULE:on_session_subscribed/3, []),
-    emqx:hook('message.publish', fun ?MODULE:on_message_publish/2, [Env]).
+    _ = emqx:hook('session.subscribed', fun ?MODULE:on_session_subscribed/3, []),
+    _ = emqx:hook('message.publish', fun ?MODULE:on_message_publish/2, [Env]),
+    ok.
 
 unload() ->
     emqx:unhook('message.publish', fun ?MODULE:on_message_publish/2),
@@ -64,7 +68,7 @@ on_session_subscribed(_, _, #{share := ShareName}) when ShareName =/= undefined 
     ok;
 on_session_subscribed(_, Topic, #{rh := Rh, is_new := IsNew}) ->
     case Rh =:= 0 orelse (Rh =:= 1 andalso IsNew) of
-        true -> emqx_pool:async_submit(fun dispatch/2, [self(), Topic]);
+        true -> emqx_pool:async_submit(fun ?MODULE:dispatch/2, [self(), Topic]);
         _ -> ok
     end.
 
@@ -79,9 +83,14 @@ dispatch(Pid, Topic) ->
 %% RETAIN flag set to 1 and payload containing zero bytes
 on_message_publish(Msg = #message{flags   = #{retain := true},
                                   topic   = Topic,
-                                  payload = <<>>}, _Env) ->
+                                  payload = <<>>}, Env) ->
     mnesia:dirty_delete(?TAB, topic2tokens(Topic)),
-    {ok, Msg};
+    case stop_publish_clear_msg(Env) of
+        true ->
+            {ok, emqx_message:set_header(allow_publish, false, Msg)};
+        _ ->
+            {ok, Msg}
+    end;
 
 on_message_publish(Msg = #message{flags = #{retain := true}}, Env) ->
     Msg1 = emqx_message:set_header(retained, true, Msg),
@@ -134,11 +143,12 @@ init([Env]) ->
                 {record_name, retained},
                 {attributes, record_info(fields, retained)},
                 {storage_properties, StoreProps}]),
-    ok = ekka_mnesia:copy_table(?TAB),
+    ok = ekka_mnesia:copy_table(?TAB, Copies),
     case mnesia:table_info(?TAB, storage_type) of
         Copies -> ok;
         _Other ->
-            {atomic, ok} = mnesia:change_table_copy_type(?TAB, node(), Copies)
+            {atomic, ok} = mnesia:change_table_copy_type(?TAB, node(), Copies),
+            ok
     end,
     StatsFun = emqx_stats:statsfun('retained.count', 'retained.max'),
     {ok, StatsTimer} = timer:send_interval(timer:seconds(1), stats),
@@ -166,15 +176,17 @@ handle_info(stats, State = #state{stats_fun = StatsFun}) ->
     {noreply, State, hibernate};
 
 handle_info(expire, State) ->
-    expire_messages(),
+    ok = expire_messages(),
     {noreply, State, hibernate};
 
 handle_info(Info, State) ->
     ?LOG(error, "Unexpected info: ~p", [Info]),
     {noreply, State}.
 
-terminate(_Reason, _State = #state{stats_timer = TRef1, expiry_timer = TRef2}) ->
-    timer:cancel(TRef1), timer:cancel(TRef2).
+terminate(_Reason, #state{stats_timer = TRef1, expiry_timer = TRef2}) ->
+    _ = timer:cancel(TRef1),
+    _ = timer:cancel(TRef2),
+    ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -193,25 +205,32 @@ sort_retained(Msgs)  ->
 store_retained(Msg = #message{topic = Topic, payload = Payload}, Env) ->
     case {is_table_full(Env), is_too_big(size(Payload), Env)} of
         {false, false} ->
-            ok = emqx_metrics:set('messages.retained', retained_count()),
+            ok = emqx_metrics:inc('messages.retained'),
             mnesia:dirty_write(?TAB, #retained{topic = topic2tokens(Topic),
                                                msg = Msg,
                                                expiry_time = get_expiry_time(Msg, Env)});
         {true, false} ->
-            case mnesia:dirty_read(?TAB, Topic) of
-                [_] ->
-                    mnesia:dirty_write(?TAB, #retained{topic = topic2tokens(Topic),
-                                                       msg = Msg,
-                                                       expiry_time = get_expiry_time(Msg, Env)});
-                [] ->
-                    ?LOG(error, "Cannot retain message(topic=~s) for table is full!", [Topic])
-            end;
+            {atomic, _} = mnesia:transaction(
+                fun() ->
+                    case mnesia:read(?TAB, Topic) of
+                        [_] ->
+                            mnesia:write(?TAB, #retained{topic = topic2tokens(Topic),
+                                                         msg = Msg,
+                                                         expiry_time = get_expiry_time(Msg, Env)}, write);
+                        [] ->
+                            ?LOG(error, "Cannot retain message(topic=~s) for table is full!", [Topic])
+                    end
+                end),
+            ok;
         {true, _} ->
             ?LOG(error, "Cannot retain message(topic=~s) for table is full!", [Topic]);
         {_, true} ->
             ?LOG(error, "Cannot retain message(topic=~s, payload_size=~p) "
                         "for payload is too big!", [Topic, iolist_size(Payload)])
     end.
+
+stop_publish_clear_msg(Env) ->
+    proplists:get_bool(stop_publish_clear_msg, Env).
 
 is_table_full(Env) ->
     Limit = proplists:get_value(max_retained_messages, Env, 0),
@@ -245,11 +264,12 @@ expire_messages() ->
     NowMs = erlang:system_time(millisecond),
     MsHd = #retained{topic = '$1', msg = '_', expiry_time = '$3'},
     Ms = [{MsHd, [{'=/=','$3',0}, {'<','$3',NowMs}], ['$1']}],
-    mnesia:transaction(
+    {atomic, _} = mnesia:transaction(
         fun() ->
             Keys = mnesia:select(?TAB, Ms, write),
             lists:foreach(fun(Key) -> mnesia:delete({?TAB, Key}) end, Keys)
-        end).
+        end),
+    ok.
 
 -spec(read_messages(emqx_types:topic())
       -> [emqx_types:message()]).
