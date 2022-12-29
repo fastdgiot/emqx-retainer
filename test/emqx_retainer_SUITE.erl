@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -31,11 +31,12 @@ all() -> emqx_ct:all(?MODULE).
 %%--------------------------------------------------------------------
 
 init_per_suite(Config) ->
-    emqx_ct_helpers:start_apps([emqx_retainer]),
+    emqx_retainer_ct_helper:ensure_start(),
     Config.
 
 end_per_suite(_Config) ->
-    emqx_ct_helpers:stop_apps([emqx_retainer]).
+    emqx_retainer_ct_helper:ensure_stop(),
+    ok.
 
 init_per_testcase(TestCase, Config) ->
     emqx_retainer:clean(<<"#">>),
@@ -207,4 +208,3 @@ receive_messages(Count, Msgs) ->
     after 2000 ->
             Msgs
     end.
-

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -27,12 +27,13 @@ init_per_suite(Config) ->
     %% Meck emqtt
     ok = meck:new(emqtt, [non_strict, passthrough, no_history, no_link]),
     %% Start Apps
-    emqx_ct_helpers:start_apps([emqx_retainer]),
+    emqx_retainer_ct_helper:ensure_start(),
     Config.
 
 end_per_suite(_Config) ->
     ok = meck:unload(emqtt),
-    emqx_ct_helpers:stop_apps([emqx_retainer]).
+    emqx_retainer_ct_helper:ensure_stop().
+
 
 %%--------------------------------------------------------------------
 %% Helpers
@@ -107,7 +108,7 @@ t_publish_message_expiry_interval(_) ->
     Msgs = receive_messages(4),
     ?assertEqual(2, length(Msgs)),  %% [MQTT-3.3.2-5]
 
-    L = lists:map(fun(Msg) -> MessageExpiryInterval = maps:get('Message-Expiry-Interval', maps:get(properties, Msg)), MessageExpiryInterval < 10 end, Msgs), 
+    L = lists:map(fun(Msg) -> MessageExpiryInterval = maps:get('Message-Expiry-Interval', maps:get(properties, Msg)), MessageExpiryInterval < 10 end, Msgs),
     ?assertEqual(2, length(L)),  %% [MQTT-3.3.2-6]
 
     ok = emqtt:disconnect(Client1),

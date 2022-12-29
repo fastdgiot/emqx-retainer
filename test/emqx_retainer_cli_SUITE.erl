@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -23,18 +23,33 @@
 
 all() -> emqx_ct:all(?MODULE).
 
+init_per_suite(Config) ->
+    emqx_retainer_ct_helper:ensure_start(),
+    Config.
+
+end_per_suite(_Config) ->
+    emqx_retainer_ct_helper:ensure_stop(),
+    ok.
+
 init_per_testcase(_TestCase, Config) ->
     Config.
 
-end_per_testcase(_TestCase, Config) ->
-    Config.
+end_per_testcase(_TestCase, _Config) ->
+    emqx_retainer:clean(<<"#">>).
 
-% t_cmd(_) ->
-%     error('TODO').
+t_cmd(_) ->
+    {ok, C1} = emqtt:start_link([{clean_start, true}, {proto_ver, v5}]),
+    {ok, _} = emqtt:connect(C1),
+    emqtt:publish(C1, <<"/retained">>, <<"this is a retained message">>, [{qos, 0}, {retain, true}]),
+    emqtt:publish(C1, <<"/retained/2">>, <<"this is a retained message">>, [{qos, 0}, {retain, true}]),
+    timer:sleep(1000),
+    ?assertMatch(ok, emqx_retainer_cli:cmd(["topics"])),
+    ?assertMatch(ok, emqx_retainer_cli:cmd(["info"])),
+    ?assertMatch(ok, emqx_retainer_cli:cmd(["clean", "retained"])),
+    ?assertMatch(ok, emqx_retainer_cli:cmd(["clean"])).
 
 % t_unload(_) ->
 %     error('TODO').
 
 % t_load(_) ->
 %     error('TODO').
-

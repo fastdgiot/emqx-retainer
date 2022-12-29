@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -33,7 +33,9 @@ cmd(["info"]) ->
 cmd(["topics"]) ->
     case mnesia:dirty_all_keys(?TAB) of
         []     -> ignore;
-        Topics -> lists:foreach(fun(Topic) -> emqx_ctl:print("~s~n", [Topic]) end, Topics)
+        Topics -> lists:foreach(fun(Topic) ->
+                                        emqx_ctl:print("~s~n", [emqx_topic:join(Topic)])
+                                end, Topics)
     end;
 
 cmd(["clean"]) ->
@@ -55,4 +57,3 @@ cmd(_) ->
 
 unload() ->
     emqx_ctl:unregister_command(retainer).
-
